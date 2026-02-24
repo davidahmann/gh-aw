@@ -5,8 +5,8 @@ const fs = require("fs");
 const { execFileSync } = require("child_process");
 const assert = require("assert");
 
-const FAIL_VALUES = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"]);
-const PENDING_VALUES = new Set(["PENDING", "QUEUED", "IN_PROGRESS", "REQUESTED", "WAITING"]);
+const FAIL_VALUES = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"]);
+const PENDING_VALUES = new Set(["PENDING", "QUEUED", "IN_PROGRESS", "REQUESTED", "WAITING", "EXPECTED"]);
 const POLICY_PATTERNS = [/\bcla\b/i, /license\/cla/i, /code[- ]?owners/i, /\bdco\b/i, /\bpolicy\b/i, /\bcompliance\b/i, /signed[- ]off/i];
 
 function norm(value) {
@@ -39,7 +39,18 @@ function classify(checks) {
 
   const failing = checks.filter(check => FAIL_VALUES.has(check.conclusion) || FAIL_VALUES.has(check.status));
   if (failing.length > 0) {
-    return failing.every(isPolicy) ? "policy_blocked" : "failed";
+    const nonPolicyFailures = failing.filter(check => !isPolicy(check));
+    if (nonPolicyFailures.length > 0) {
+      return "failed";
+    }
+
+    const pending = checks.filter(check => PENDING_VALUES.has(check.status) || PENDING_VALUES.has(check.conclusion));
+    const nonPolicyPending = pending.filter(check => !isPolicy(check));
+    if (nonPolicyPending.length > 0) {
+      return "pending";
+    }
+
+    return "policy_blocked";
   }
 
   const pending = checks.filter(check => PENDING_VALUES.has(check.status) || PENDING_VALUES.has(check.conclusion));
@@ -54,6 +65,9 @@ function loadStatusRollup(path) {
   const payload = JSON.parse(fs.readFileSync(path, "utf8"));
   if (Array.isArray(payload)) {
     return payload;
+  }
+  if (payload && payload.statusCheckRollup === null) {
+    return [];
   }
   if (payload && Array.isArray(payload.statusCheckRollup)) {
     return payload.statusCheckRollup;
@@ -89,8 +103,17 @@ function selfTest() {
   assert.equal(classify([]), "no_checks");
   assert.equal(classify([{ name: "unit", conclusion: "SUCCESS", status: "COMPLETED" }]), "passed");
   assert.equal(classify([{ name: "build", conclusion: "FAILURE", status: "COMPLETED" }]), "failed");
+  assert.equal(classify([{ name: "build", conclusion: "STARTUP_FAILURE", status: "COMPLETED" }]), "failed");
   assert.equal(classify([{ name: "license/cla", conclusion: "", status: "QUEUED" }]), "policy_blocked");
   assert.equal(classify([{ name: "tests", conclusion: "", status: "IN_PROGRESS" }]), "pending");
+  assert.equal(classify([{ name: "required", conclusion: "EXPECTED", status: "EXPECTED" }]), "pending");
+  assert.equal(
+    classify([
+      { name: "license/cla", conclusion: "ACTION_REQUIRED", status: "COMPLETED" },
+      { name: "tests", conclusion: "", status: "IN_PROGRESS" },
+    ]),
+    "pending"
+  );
   process.stdout.write(`${JSON.stringify({ self_test: "ok" })}\n`);
 }
 
